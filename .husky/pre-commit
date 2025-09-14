@@ -1,6 +1,14 @@
 #!/usr/bin/env sh
 . "$(dirname -- "$0")/_/husky.sh"
 
+# 尝试多种方式查找 npx 命令
 if command -v npx >/dev/null 2>&1; then
   npx lint-staged
+elif [ -f "/d/Program Files/nodejs/npx" ]; then
+  "/d/Program Files/nodejs/npx" lint-staged
+elif [ -f "/c/Program Files/nodejs/npx" ]; then
+  "/c/Program Files/nodejs/npx" lint-staged
+else
+  echo "Warning: npx not found, skipping lint-staged"
+  echo "Please ensure Node.js is properly installed and in PATH"
 fi
