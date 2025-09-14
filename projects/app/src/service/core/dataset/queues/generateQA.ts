@@ -1,42 +1,89 @@
+/**
+ * QA生成队列模块
+ * 负责使用LLM从原始文本生成问答对，用于数据集训练
+ */
+
+// MongoDB 模型
 import { MongoDatasetTraining } from '@fastgpt/service/core/dataset/training/schema';
+
+// 使用量统计
 import { pushLLMTrainingUsage } from '@fastgpt/service/support/wallet/usage/controller';
+
+// 常量定义
 import { TrainingModeEnum } from '@fastgpt/global/core/dataset/constants';
+
+// AI 相关
 import { createChatCompletion } from '@fastgpt/service/core/ai/config';
 import type { ChatCompletionMessageParam } from '@fastgpt/global/core/ai/type.d';
-import { addLog } from '@fastgpt/service/common/system/log';
-import { replaceVariable } from '@fastgpt/global/common/string/tools';
-import { Prompt_AgentQA } from '@fastgpt/global/core/ai/prompt/agent';
-import type { PushDatasetDataChunkProps } from '@fastgpt/global/core/dataset/api.d';
 import { getLLMModel } from '@fastgpt/service/core/ai/model';
-import { checkTeamAiPointsAndLock } from './utils';
-import { addMinutes } from 'date-fns';
+import type { LLMModelItemType } from '@fastgpt/global/core/ai/model.d';
+import { llmCompletionsBodyFormat, formatLLMResponse } from '@fastgpt/service/core/ai/utils';
+
+// 日志系统
+import { addLog } from '@fastgpt/service/common/system/log';
+
+// 字符串处理
+import { replaceVariable } from '@fastgpt/global/common/string/tools';
 import {
   countGptMessagesTokens,
   countPromptTokens
 } from '@fastgpt/service/common/string/tiktoken/index';
+
+// 提示词
+import { Prompt_AgentQA } from '@fastgpt/global/core/ai/prompt/agent';
+
+// 类型定义
+import type { PushDatasetDataChunkProps } from '@fastgpt/global/core/dataset/api.d';
+
+// 工具函数
+import { checkTeamAiPointsAndLock } from './utils';
+import { getErrText } from '@fastgpt/global/common/error/utils';
+import { delay } from '@fastgpt/service/common/bullmq';
+
+// 时间处理
+import { addMinutes } from 'date-fns';
+
+// 聊天相关
 import { loadRequestMessages } from '@fastgpt/service/core/chat/utils';
-import { llmCompletionsBodyFormat, formatLLMResponse } from '@fastgpt/service/core/ai/utils';
-import type { LLMModelItemType } from '@fastgpt/global/core/ai/model.d';
+
+// 训练相关
 import {
   chunkAutoChunkSize,
   getLLMMaxChunkSize
 } from '@fastgpt/global/core/dataset/training/utils';
-import { getErrText } from '@fastgpt/global/common/error/utils';
 import { text2Chunks } from '@fastgpt/service/worker/function';
 import { pushDataListToTrainingQueue } from '@fastgpt/service/core/dataset/training/controller';
-import { delay } from '@fastgpt/service/common/bullmq';
 
+/**
+ * 减少队列计数器
+ * 用于管理全局QA队列的并发数量
+ * @returns 是否队列已清空
+ */
 const reduceQueue = () => {
   global.qaQueueLen = global.qaQueueLen > 0 ? global.qaQueueLen - 1 : 0;
 
   return global.qaQueueLen === 0;
 };
 
+/**
+ * 数据库关联查询类型定义
+ */
 type PopulateType = {
   dataset: { vectorModel: string; agentModel: string; vlmModel: string };
   collection: { qaPrompt?: string };
 };
 
+/**
+ * QA生成主函数
+ * 处理流程：
+ * 1. 检查队列容量限制
+ * 2. 获取待处理的训练数据
+ * 3. 使用LLM生成问答对
+ * 4. 格式化和分割生成的QA内容
+ * 5. 推送到训练队列
+ * 6. 记录使用量和清理任务
+ * @returns Promise<any>
+ */
 export async function generateQA(): Promise<any> {
   const max = global.systemEnv?.qaMaxProcess || 10;
   addLog.debug(`[QA Queue] Queue size: ${global.qaQueueLen}`);
@@ -207,7 +254,14 @@ export async function generateQA(): Promise<any> {
   addLog.debug(`[QA Queue] break loop, current queue size: ${global.qaQueueLen}`);
 }
 
-// Format qa answer
+/**
+ * 格式化和分割QA答案
+ * 从LLM生成的答案中提取问答对，如果提取失败则直接分块
+ * @param answer - LLM生成的答案文本
+ * @param rawText - 原始文本
+ * @param llmModel - 使用的LLM模型
+ * @returns 格式化后的问答对数组
+ */
 async function formatSplitText({
   answer,
   rawText,

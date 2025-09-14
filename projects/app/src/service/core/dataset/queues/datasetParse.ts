@@ -1,5 +1,10 @@
-/* Dataset collection source parse, not max size. */
+/**
+ * 数据集解析队列模块
+ * 负责处理数据集集合的源文件解析，包括文本提取、AI段落处理、文本分块等
+ * 注意：此模块不处理最大尺寸限制
+ */
 
+// 常量定义
 import { ParagraphChunkAIModeEnum } from '@fastgpt/global/core/dataset/constants';
 import {
   DatasetCollectionDataProcessModeEnum,
@@ -7,31 +12,62 @@ import {
   DatasetSourceReadTypeEnum,
   TrainingModeEnum
 } from '@fastgpt/global/core/dataset/constants';
+import { DatasetDataIndexTypeEnum } from '@fastgpt/global/core/dataset/data/constants';
+
+// 类型定义
 import type {
   DatasetCollectionSchemaType,
   DatasetSchemaType
 } from '@fastgpt/global/core/dataset/type';
+
+// 日志系统
 import { addLog } from '@fastgpt/service/common/system/log';
+
+// MongoDB 模型
 import { MongoDatasetTraining } from '@fastgpt/service/core/dataset/training/schema';
+import { MongoDatasetCollection } from '@fastgpt/service/core/dataset/collection/schema';
+import { MongoImage } from '@fastgpt/service/common/file/image/schema';
+
+// 时间处理
 import { addMinutes } from 'date-fns';
+
+// 工具函数
 import { checkTeamAiPointsAndLock } from './utils';
 import { getErrText } from '@fastgpt/global/common/error/utils';
 import { delay } from '@fastgpt/service/common/bullmq';
+import { hashStr } from '@fastgpt/global/common/string/tools';
+
+// 数据集处理
 import { rawText2Chunks, readDatasetSourceRawText } from '@fastgpt/service/core/dataset/read';
-import { getLLMModel } from '@fastgpt/service/core/ai/model';
-import { getLLMMaxChunkSize } from '@fastgpt/global/core/dataset/training/utils';
-import { checkDatasetIndexLimit } from '@fastgpt/service/support/permission/teamLimit';
-import { predictDataLimitLength } from '@fastgpt/global/core/dataset/utils';
 import { getTrainingModeByCollection } from '@fastgpt/service/core/dataset/collection/utils';
 import { pushDataListToTrainingQueue } from '@fastgpt/service/core/dataset/training/controller';
-import { DatasetDataIndexTypeEnum } from '@fastgpt/global/core/dataset/data/constants';
-import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
-import { MongoDatasetCollection } from '@fastgpt/service/core/dataset/collection/schema';
-import { hashStr } from '@fastgpt/global/common/string/tools';
-import { POST } from '@fastgpt/service/common/api/plusRequest';
-import { pushLLMTrainingUsage } from '@fastgpt/service/support/wallet/usage/controller';
-import { MongoImage } from '@fastgpt/service/common/file/image/schema';
 
+// AI 模型相关
+import { getLLMModel } from '@fastgpt/service/core/ai/model';
+import { getLLMMaxChunkSize } from '@fastgpt/global/core/dataset/training/utils';
+
+// 权限和限制
+import { checkDatasetIndexLimit } from '@fastgpt/service/support/permission/teamLimit';
+import { predictDataLimitLength } from '@fastgpt/global/core/dataset/utils';
+
+// 数据库事务
+import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
+
+// API 请求
+import { POST } from '@fastgpt/service/common/api/plusRequest';
+
+// 使用量统计
+import { pushLLMTrainingUsage } from '@fastgpt/service/support/wallet/usage/controller';
+
+/**
+ * 请求LLM进行段落处理
+ * 根据配置的AI模式对原始文本进行智能段落分割和优化
+ * @param rawText - 原始文本内容
+ * @param model - 使用的LLM模型
+ * @param billId - 计费ID
+ * @param paragraphChunkAIMode - 段落AI处理模式
+ * @returns 处理结果，包含处理后的文本和token消耗
+ */
 const requestLLMPargraph = async ({
   rawText,
   model,
@@ -88,6 +124,19 @@ const requestLLMPargraph = async ({
   return data;
 };
 
+/**
+ * 数据集解析队列处理函数
+ * 主要处理流程：
+ * 1. 获取待解析任务并加锁
+ * 2. 读取源文件内容
+ * 3. LLM段落处理
+ * 4. 文本分块
+ * 5. 检查数据集限制
+ * 6. 更新集合信息
+ * 7. 推送到训练队列
+ * 8. 清理任务和相关资源
+ * @returns Promise<any>
+ */
 export const datasetParseQueue = async (): Promise<any> => {
   const startTime = Date.now();
 

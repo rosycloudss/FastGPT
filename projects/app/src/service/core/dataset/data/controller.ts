@@ -1,25 +1,57 @@
+/**
+ * 数据集数据控制器模块
+ * 负责数据集数据的创建、更新、删除等核心操作
+ * 包含向量索引管理、文本分块、数据库事务处理等功能
+ */
+
+// MongoDB 数据模型
 import { MongoDatasetData } from '@fastgpt/service/core/dataset/data/schema';
+
+// 类型定义
 import {
   type CreateDatasetDataProps,
   type PatchIndexesProps,
   type UpdateDatasetDataProps
 } from '@fastgpt/global/core/dataset/controller';
-import { insertDatasetDataVector } from '@fastgpt/service/common/vectorDB/controller';
-import { jiebaSplit } from '@fastgpt/service/common/string/jieba/index';
-import { deleteDatasetDataVector } from '@fastgpt/service/common/vectorDB/controller';
 import {
   type DatasetDataIndexItemType,
   type DatasetDataItemType
 } from '@fastgpt/global/core/dataset/type';
-import { getEmbeddingModel } from '@fastgpt/service/core/ai/model';
-import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
 import { type ClientSession } from '@fastgpt/service/common/mongo';
-import { MongoDatasetDataText } from '@fastgpt/service/core/dataset/data/dataTextSchema';
-import { DatasetDataIndexTypeEnum } from '@fastgpt/global/core/dataset/data/constants';
+
+// 向量数据库操作
+import { insertDatasetDataVector } from '@fastgpt/service/common/vectorDB/controller';
+import { deleteDatasetDataVector } from '@fastgpt/service/common/vectorDB/controller';
+
+// 文本处理工具
+import { jiebaSplit } from '@fastgpt/service/common/string/jieba/index';
 import { countPromptTokens } from '@fastgpt/service/common/string/tiktoken';
-import { deleteDatasetImage } from '@fastgpt/service/core/dataset/image/controller';
 import { text2Chunks } from '@fastgpt/service/worker/function';
 
+// AI 模型相关
+import { getEmbeddingModel } from '@fastgpt/service/core/ai/model';
+
+// 数据库操作
+import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
+import { MongoDatasetDataText } from '@fastgpt/service/core/dataset/data/dataTextSchema';
+
+// 常量定义
+import { DatasetDataIndexTypeEnum } from '@fastgpt/global/core/dataset/data/constants';
+
+// 图片处理
+import { deleteDatasetImage } from '@fastgpt/service/core/dataset/image/controller';
+
+/**
+ * 格式化索引数据
+ * 将原始索引数据转换为标准格式，包含文本分块和token计算
+ * @param indexes - 原始索引数组
+ * @param q - 问题文本
+ * @param a - 答案文本
+ * @param indexSize - 索引块大小
+ * @param maxIndexSize - 最大索引大小
+ * @param indexPrefix - 索引前缀
+ * @returns 格式化后的索引数组
+ */
 const formatIndexes = async ({
   indexes = [],
   q,
@@ -160,6 +192,25 @@ const formatIndexes = async ({
  * 2. insert pg
  * 3. create mongo data
  */
+/**
+ * 向数据集插入新数据
+ * 包含向量索引创建、MongoDB数据存储、全文索引等完整流程
+ * @param teamId - 团队ID
+ * @param tmbId - 团队成员ID
+ * @param datasetId - 数据集ID
+ * @param collectionId - 集合ID
+ * @param q - 问题文本
+ * @param a - 答案文本
+ * @param imageId - 图片ID（可选）
+ * @param chunkIndex - 分块索引
+ * @param indexSize - 索引大小
+ * @param indexes - 索引数组
+ * @param indexPrefix - 索引前缀
+ * @param embeddingModel - 嵌入模型名称
+ * @param imageDescMap - 图片描述映射
+ * @param session - 数据库会话
+ * @returns 插入结果，包含ID和token消耗
+ */
 export async function insertData2Dataset({
   teamId,
   tmbId,
@@ -255,12 +306,20 @@ export async function insertData2Dataset({
 }
 
 /**
- * Update data(indexes overwrite)
- * 1. compare indexes
- * 2. insert new pg data
- * session run:
- *  3. update mongo data(session run)
- *  4. delete old pg data
+ * 更新数据集数据（索引覆盖模式）
+ * 执行流程：
+ * 1. 比较新旧索引差异
+ * 2. 插入新的向量数据
+ * 3. 在事务中更新MongoDB数据
+ * 4. 删除旧的向量数据
+ * @param dataId - 数据ID
+ * @param q - 问题文本
+ * @param a - 答案文本
+ * @param indexes - 新的索引数组
+ * @param model - 嵌入模型名称
+ * @param indexSize - 索引大小
+ * @param indexPrefix - 索引前缀
+ * @returns 更新结果，包含token消耗
  */
 export async function updateData2Dataset({
   dataId,
@@ -413,6 +472,11 @@ export async function updateData2Dataset({
   };
 }
 
+/**
+ * 删除数据集数据
+ * 完整删除流程：MongoDB数据、图片文件、向量数据
+ * @param data - 要删除的数据项
+ */
 export const deleteDatasetData = async (data: DatasetDataItemType) => {
   await mongoSessionRun(async (session) => {
     // 1. Delete MongoDB data
