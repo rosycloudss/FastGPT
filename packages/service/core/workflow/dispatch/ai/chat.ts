@@ -1,3 +1,35 @@
+/**
+ * AI对话节点调度器
+ * 
+ * 这是FastGPT工作流中最核心的节点之一，负责处理AI对话的完整流程。
+ * 主要功能包括：
+ * 1. 消息上下文构建和管理
+ * 2. 数据集引用和文档引用处理
+ * 3. 多模态输入支持（文本、图片、文件）
+ * 4. 流式响应和实时输出
+ * 5. 推理过程展示
+ * 6. Token使用统计和计费
+ * 7. 内容审核和安全检查
+ * 8. 历史对话管理
+ * 
+ * 核心特性：
+ * - 支持多种LLM模型（OpenAI、Claude、本地模型等）
+ * - 智能上下文管理，自动截断超长对话
+ * - 数据集检索结果的智能引用
+ * - 文档内容的自动解析和引用
+ * - 推理过程的实时展示
+ * - 流式响应优化用户体验
+ * - 完整的错误处理和异常恢复
+ * 
+ * 处理流程：
+ * 1. 参数验证和模型配置
+ * 2. 构建对话上下文（系统提示词、历史对话、用户输入）
+ * 3. 处理数据集引用和文档引用
+ * 4. 调用LLM API进行对话
+ * 5. 解析响应并进行流式输出
+ * 6. 统计使用量并返回结果
+ */
+
 import type { NextApiResponse } from 'next';
 import { filterGPTMessageByMaxContext, loadRequestMessages } from '../../../chat/utils';
 import type { ChatItemType, UserChatItemValueItemType } from '@fastgpt/global/core/chat/type.d';
@@ -58,63 +90,126 @@ import { ModelTypeEnum } from '@fastgpt/global/core/ai/model';
 import { postTextCensor } from '../../../chat/postTextCensor';
 import { getErrText } from '@fastgpt/global/common/error/utils';
 
+/**
+ * AI对话节点输入参数类型
+ * 
+ * 定义了AI对话节点的所有输入参数，包括基础配置和动态输入。
+ */
 export type ChatProps = ModuleDispatchProps<
   AIChatNodeProps & {
+    /** 用户聊天输入内容 */
     [NodeInputKeyEnum.userChatInput]?: string;
+    /** 对话历史，可以是历史记录数组或历史记录数量 */
     [NodeInputKeyEnum.history]?: ChatItemType[] | number;
+    /** 数据集检索引用结果 */
     [NodeInputKeyEnum.aiChatDatasetQuote]?: SearchDataResponseItemType[];
   }
 >;
+
+/**
+ * AI对话节点输出结果类型
+ * 
+ * 定义了AI对话节点的输出结果结构，包括成功和错误情况。
+ */
 export type ChatResponse = DispatchNodeResultType<
   {
+    /** AI回答文本 */
     [NodeOutputKeyEnum.answerText]: string;
+    /** 推理过程文本（可选） */
     [NodeOutputKeyEnum.reasoningText]?: string;
+    /** 更新后的对话历史 */
     [NodeOutputKeyEnum.history]: ChatItemType[];
   },
   {
+    /** 错误信息文本 */
     [NodeOutputKeyEnum.errorText]: string;
   }
 >;
 
-/* request openai chat */
+/**
+ * AI对话节点调度函数
+ * 
+ * 这是AI对话节点的主要执行函数，负责处理完整的AI对话流程。
+ * 从用户输入到AI响应的全过程管理。
+ * 
+ * 主要处理步骤：
+ * 1. 参数验证和模型配置检查
+ * 2. 构建对话上下文（历史对话、系统提示词、用户输入）
+ * 3. 处理数据集引用和文档引用
+ * 4. 内容审核（如果启用）
+ * 5. 调用LLM API进行对话生成
+ * 6. 处理流式响应或一次性响应
+ * 7. 解析推理过程和回答内容
+ * 8. 统计Token使用量和计费
+ * 9. 返回格式化的结果
+ * 
+ * 支持的功能：
+ * - 多模态输入（文本、图片、文件）
+ * - 数据集检索结果引用
+ * - 文档内容引用
+ * - 推理过程展示
+ * - 流式响应
+ * - 历史对话管理
+ * - 内容安全检查
+ * 
+ * @param props - AI对话节点的输入参数
+ * @returns Promise<ChatResponse> - AI对话的执行结果
+ * 
+ * @example
+ * ```typescript
+ * const result = await dispatchChatCompletion({
+ *   params: {
+ *     model: 'gpt-3.5-turbo',
+ *     userChatInput: '你好，请介绍一下FastGPT',
+ *     systemPrompt: '你是一个AI助手',
+ *     temperature: 0.7,
+ *     maxToken: 2000
+ *   },
+ *   // ... 其他参数
+ * });
+ * 
+ * console.log('AI回答:', result.data.answerText);
+ * ```
+ */
 export const dispatchChatCompletion = async (props: ChatProps): Promise<ChatResponse> => {
   let {
-    res,
-    requestOrigin,
-    stream = false,
-    retainDatasetCite = true,
-    externalProvider,
-    histories,
-    node: { name, version, inputs },
-    query,
-    runningUserInfo,
-    workflowStreamResponse,
-    chatConfig,
+    res,                          // HTTP响应对象，用于流式输出
+    requestOrigin,                // 请求来源
+    stream = false,               // 是否启用流式响应
+    retainDatasetCite = true,     // 是否保留数据集引用
+    externalProvider,             // 外部提供者配置
+    histories,                    // 对话历史
+    node: { name, version, inputs }, // 节点信息
+    query,                        // 用户查询
+    runningUserInfo,              // 运行用户信息
+    workflowStreamResponse,       // 工作流流式响应函数
+    chatConfig,                   // 聊天配置
     params: {
-      model,
-      temperature,
-      maxToken,
-      history = 6,
-      quoteQA,
-      userChatInput = '',
-      isResponseAnswerText = true,
-      systemPrompt = '',
-      aiChatQuoteRole = 'system',
-      quoteTemplate,
-      quotePrompt,
-      aiChatVision,
-      aiChatReasoning = true,
-      aiChatTopP,
-      aiChatStopSign,
-      aiChatResponseFormat,
-      aiChatJsonSchema,
+      model,                      // 使用的LLM模型
+      temperature,                // 温度参数，控制回答的随机性
+      maxToken,                   // 最大Token数量
+      history = 6,                // 历史对话轮数
+      quoteQA,                    // 数据集检索引用
+      userChatInput = '',         // 用户输入文本
+      isResponseAnswerText = true, // 是否响应回答文本
+      systemPrompt = '',          // 系统提示词
+      aiChatQuoteRole = 'system', // 引用角色（system/user）
+      quoteTemplate,              // 引用模板
+      quotePrompt,                // 引用提示词
+      aiChatVision,               // 是否启用视觉功能
+      aiChatReasoning = true,     // 是否启用推理功能
+      aiChatTopP,                 // Top-P参数
+      aiChatStopSign,             // 停止标志
+      aiChatResponseFormat,       // 响应格式
+      aiChatJsonSchema,           // JSON Schema
 
-      fileUrlList: fileLinks, // node quote file links
-      stringQuoteText //abandon
+      fileUrlList: fileLinks,     // 节点引用的文件链接
+      stringQuoteText             // 字符串引用文本（已废弃）
     }
   } = props;
-  const { files: inputFiles } = chatValue2RuntimePrompt(query); // Chat box input files
+  const { files: inputFiles } = chatValue2RuntimePrompt(query); // 从聊天框输入中提取文件
 
+  // 1. 模型配置验证
   const modelConstantsData = getLLMModel(model);
   if (!modelConstantsData) {
     return getNodeErrResponse({

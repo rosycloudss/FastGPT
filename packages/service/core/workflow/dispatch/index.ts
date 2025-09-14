@@ -1,3 +1,34 @@
+/**
+ * 工作流引擎调度器
+ * 
+ * 这是FastGPT的核心工作流执行引擎，负责协调和执行整个工作流的运行。
+ * 主要功能包括：
+ * 1. 工作流节点的调度和执行
+ * 2. 节点间数据流转和状态管理
+ * 3. 边（连线）状态的动态更新
+ * 4. 交互式节点的处理
+ * 5. 流式响应和实时通信
+ * 6. 错误处理和异常恢复
+ * 7. 资源使用统计和限制
+ * 8. 调试模式支持
+ * 
+ * 核心特性：
+ * - 基于DAG（有向无环图）的节点调度
+ * - 支持条件分支和循环结构
+ * - 动态变量替换和引用解析
+ * - 实时流式响应（SSE）
+ * - 交互式节点支持
+ * - 深度限制防止无限递归
+ * - 内存管理和状态持久化
+ * 
+ * 执行流程：
+ * 1. 初始化工作流环境和变量
+ * 2. 从起始节点开始执行
+ * 3. 根据节点输出和边的条件确定下一步执行的节点
+ * 4. 递归执行直到所有路径完成或遇到交互节点
+ * 5. 收集和返回执行结果
+ */
+
 import { getNanoid } from '@fastgpt/global/common/string/tools';
 import { getSystemTime } from '@fastgpt/global/common/time/timezone';
 import type {
@@ -77,89 +108,165 @@ import type { DispatchFlowResponse } from './type';
 import { removeSystemVariable, rewriteRuntimeWorkFlow } from './utils';
 import { getHandleId } from '@fastgpt/global/core/workflow/utils';
 
+/**
+ * 节点类型到调度函数的映射表
+ * 
+ * 这个映射表定义了每种节点类型对应的执行函数。
+ * 工作流引擎根据节点类型查找对应的处理函数来执行节点逻辑。
+ * 
+ * 节点分类：
+ * 1. 核心节点：工作流起始、AI对话、数据集检索等
+ * 2. 工具节点：HTTP请求、代码执行、文本编辑等
+ * 3. 控制节点：条件判断、循环、变量更新等
+ * 4. 交互节点：用户选择、表单输入等
+ * 5. 插件节点：自定义插件、应用模块等
+ * 6. 配置节点：系统配置、全局变量等（无实际执行逻辑）
+ */
 const callbackMap: Record<FlowNodeTypeEnum, Function> = {
-  [FlowNodeTypeEnum.workflowStart]: dispatchWorkflowStart,
-  [FlowNodeTypeEnum.answerNode]: dispatchAnswer,
-  [FlowNodeTypeEnum.chatNode]: dispatchChatCompletion,
-  [FlowNodeTypeEnum.datasetSearchNode]: dispatchDatasetSearch,
-  [FlowNodeTypeEnum.datasetConcatNode]: dispatchDatasetConcat,
-  [FlowNodeTypeEnum.classifyQuestion]: dispatchClassifyQuestion,
-  [FlowNodeTypeEnum.contentExtract]: dispatchContentExtract,
-  [FlowNodeTypeEnum.httpRequest468]: dispatchHttp468Request,
-  [FlowNodeTypeEnum.appModule]: dispatchRunAppNode,
-  [FlowNodeTypeEnum.pluginModule]: dispatchRunPlugin,
-  [FlowNodeTypeEnum.pluginInput]: dispatchPluginInput,
-  [FlowNodeTypeEnum.pluginOutput]: dispatchPluginOutput,
-  [FlowNodeTypeEnum.queryExtension]: dispatchQueryExtension,
-  [FlowNodeTypeEnum.agent]: dispatchRunTools,
-  [FlowNodeTypeEnum.stopTool]: dispatchStopToolCall,
-  [FlowNodeTypeEnum.toolParams]: dispatchToolParams,
-  [FlowNodeTypeEnum.lafModule]: dispatchLafRequest,
-  [FlowNodeTypeEnum.ifElseNode]: dispatchIfElse,
-  [FlowNodeTypeEnum.variableUpdate]: dispatchUpdateVariable,
-  [FlowNodeTypeEnum.code]: dispatchCodeSandbox,
-  [FlowNodeTypeEnum.textEditor]: dispatchTextEditor,
-  [FlowNodeTypeEnum.customFeedback]: dispatchCustomFeedback,
-  [FlowNodeTypeEnum.readFiles]: dispatchReadFiles,
-  [FlowNodeTypeEnum.userSelect]: dispatchUserSelect,
-  [FlowNodeTypeEnum.loop]: dispatchLoop,
-  [FlowNodeTypeEnum.loopStart]: dispatchLoopStart,
-  [FlowNodeTypeEnum.loopEnd]: dispatchLoopEnd,
-  [FlowNodeTypeEnum.formInput]: dispatchFormInput,
-  [FlowNodeTypeEnum.tool]: dispatchRunTool,
+  // 核心功能节点
+  [FlowNodeTypeEnum.workflowStart]: dispatchWorkflowStart,        // 工作流起始节点
+  [FlowNodeTypeEnum.answerNode]: dispatchAnswer,                  // 回答节点
+  [FlowNodeTypeEnum.chatNode]: dispatchChatCompletion,            // AI对话节点
+  [FlowNodeTypeEnum.datasetSearchNode]: dispatchDatasetSearch,    // 数据集检索节点
+  [FlowNodeTypeEnum.datasetConcatNode]: dispatchDatasetConcat,    // 数据集合并节点
+  [FlowNodeTypeEnum.classifyQuestion]: dispatchClassifyQuestion,  // 问题分类节点
+  [FlowNodeTypeEnum.contentExtract]: dispatchContentExtract,      // 内容提取节点
+  
+  // 工具和服务节点
+  [FlowNodeTypeEnum.httpRequest468]: dispatchHttp468Request,      // HTTP请求节点
+  [FlowNodeTypeEnum.lafModule]: dispatchLafRequest,               // Laf云函数节点
+  [FlowNodeTypeEnum.code]: dispatchCodeSandbox,                   // 代码执行节点
+  [FlowNodeTypeEnum.textEditor]: dispatchTextEditor,              // 文本编辑节点
+  [FlowNodeTypeEnum.readFiles]: dispatchReadFiles,                // 文件读取节点
+  [FlowNodeTypeEnum.queryExtension]: dispatchQueryExtension,      // 查询扩展节点
+  
+  // 控制流节点
+  [FlowNodeTypeEnum.ifElseNode]: dispatchIfElse,                  // 条件判断节点
+  [FlowNodeTypeEnum.variableUpdate]: dispatchUpdateVariable,      // 变量更新节点
+  [FlowNodeTypeEnum.loop]: dispatchLoop,                          // 循环节点
+  [FlowNodeTypeEnum.loopStart]: dispatchLoopStart,                // 循环开始节点
+  [FlowNodeTypeEnum.loopEnd]: dispatchLoopEnd,                    // 循环结束节点
+  
+  // 交互节点
+  [FlowNodeTypeEnum.userSelect]: dispatchUserSelect,              // 用户选择节点
+  [FlowNodeTypeEnum.formInput]: dispatchFormInput,                // 表单输入节点
+  [FlowNodeTypeEnum.customFeedback]: dispatchCustomFeedback,      // 自定义反馈节点
+  
+  // AI Agent相关节点
+  [FlowNodeTypeEnum.agent]: dispatchRunTools,                     // AI Agent节点
+  [FlowNodeTypeEnum.stopTool]: dispatchStopToolCall,              // 停止工具调用节点
+  [FlowNodeTypeEnum.toolParams]: dispatchToolParams,              // 工具参数节点
+  [FlowNodeTypeEnum.tool]: dispatchRunTool,                       // 工具执行节点
+  
+  // 插件和应用节点
+  [FlowNodeTypeEnum.appModule]: dispatchRunAppNode,               // 应用模块节点
+  [FlowNodeTypeEnum.pluginModule]: dispatchRunPlugin,             // 插件模块节点
+  [FlowNodeTypeEnum.pluginInput]: dispatchPluginInput,            // 插件输入节点
+  [FlowNodeTypeEnum.pluginOutput]: dispatchPluginOutput,          // 插件输出节点
 
-  // none
-  [FlowNodeTypeEnum.systemConfig]: dispatchSystemConfig,
-  [FlowNodeTypeEnum.pluginConfig]: () => Promise.resolve(),
-  [FlowNodeTypeEnum.emptyNode]: () => Promise.resolve(),
-  [FlowNodeTypeEnum.globalVariable]: () => Promise.resolve(),
-  [FlowNodeTypeEnum.comment]: () => Promise.resolve(),
-  [FlowNodeTypeEnum.toolSet]: () => Promise.resolve(),
+  // 配置节点（无实际执行逻辑）
+  [FlowNodeTypeEnum.systemConfig]: dispatchSystemConfig,          // 系统配置节点
+  [FlowNodeTypeEnum.pluginConfig]: () => Promise.resolve(),       // 插件配置节点
+  [FlowNodeTypeEnum.emptyNode]: () => Promise.resolve(),          // 空节点
+  [FlowNodeTypeEnum.globalVariable]: () => Promise.resolve(),     // 全局变量节点
+  [FlowNodeTypeEnum.comment]: () => Promise.resolve(),            // 注释节点
+  [FlowNodeTypeEnum.toolSet]: () => Promise.resolve(),            // 工具集节点
 
-  // @deprecated
-  [FlowNodeTypeEnum.runApp]: dispatchAppRequest
+  // 已废弃的节点
+  [FlowNodeTypeEnum.runApp]: dispatchAppRequest                   // @deprecated 运行应用节点
 };
 
+/**
+ * 工作流调度参数类型
+ */
 type Props = ChatDispatchProps & {
+  /** 运行时节点列表 */
   runtimeNodes: RuntimeNodeItemType[];
+  /** 运行时边（连线）列表 */
   runtimeEdges: RuntimeEdgeItemType[];
 };
+
+/**
+ * 节点响应类型
+ */
 type NodeResponseType = DispatchNodeResultType<{
   [key: string]: any;
 }>;
+
+/**
+ * 完整的节点响应类型
+ */
 type NodeResponseCompleteType = Omit<NodeResponseType, 'responseData'> & {
+  /** 节点响应数据 */
   [DispatchNodeResponseKeyEnum.nodeResponse]?: ChatHistoryItemResType;
 };
 
-/* running */
+/**
+ * 工作流调度主函数
+ * 
+ * 这是工作流执行的入口函数，负责协调整个工作流的执行过程。
+ * 支持多种执行模式：正常模式、调试模式、工具调用模式等。
+ * 
+ * 主要功能：
+ * 1. 初始化执行环境和变量
+ * 2. 设置流式响应（SSE）
+ * 3. 递归执行工作流节点
+ * 4. 处理交互式节点
+ * 5. 收集执行结果和统计信息
+ * 6. 错误处理和资源清理
+ * 
+ * 执行策略：
+ * - 深度限制：防止无限递归调用
+ * - 并发控制：合理管理节点执行顺序
+ * - 状态管理：实时更新节点和边的状态
+ * - 内存管理：及时清理不需要的数据
+ * 
+ * @param data - 工作流执行参数
+ * @returns Promise<DispatchFlowResponse> - 工作流执行结果
+ * 
+ * @example
+ * ```typescript
+ * const result = await dispatchWorkFlow({
+ *   runtimeNodes: workflowNodes,
+ *   runtimeEdges: workflowEdges,
+ *   variables: { userInput: 'Hello' },
+ *   stream: true,
+ *   mode: 'chat'
+ * });
+ * 
+ * console.log(`工作流执行完成，运行了 ${result.runTimes} 次`);
+ * ```
+ */
 export async function dispatchWorkFlow(data: Props): Promise<DispatchFlowResponse> {
   let {
-    res,
-    runtimeNodes = [],
-    runtimeEdges = [],
-    histories = [],
-    variables = {},
-    timezone,
-    externalProvider,
-    stream = false,
-    retainDatasetCite = true,
-    version = 'v1',
-    responseDetail = true,
-    responseAllData = true,
+    res,                        // HTTP响应对象，用于流式输出
+    runtimeNodes = [],          // 运行时节点列表
+    runtimeEdges = [],          // 运行时边列表
+    histories = [],             // 对话历史
+    variables = {},             // 工作流变量
+    timezone,                   // 时区设置
+    externalProvider,           // 外部提供者配置
+    stream = false,             // 是否启用流式响应
+    retainDatasetCite = true,   // 是否保留数据集引用
+    version = 'v1',             // API版本
+    responseDetail = true,      // 是否返回详细响应
+    responseAllData = true,     // 是否返回所有数据
     ...props
   } = data;
-  const startTime = Date.now();
+  const startTime = Date.now(); // 记录开始时间
 
+  // 1. 重写运行时工作流（国际化处理等）
   await rewriteRuntimeWorkFlow({ nodes: runtimeNodes, edges: runtimeEdges, lang: data.lang });
 
-  // 初始化深度和自动增加深度，避免无限嵌套
+  // 2. 初始化调度深度，防止无限嵌套
   if (!props.workflowDispatchDeep) {
-    props.workflowDispatchDeep = 1;
+    props.workflowDispatchDeep = 1;  // 首次调用，深度为1
   } else {
-    props.workflowDispatchDeep += 1;
+    props.workflowDispatchDeep += 1; // 递归调用，深度递增
   }
-  const isRootRuntime = props.workflowDispatchDeep === 1;
+  const isRootRuntime = props.workflowDispatchDeep === 1; // 是否为根级调用
 
+  // 3. 深度限制检查，防止无限递归
   if (props.workflowDispatchDeep > 20) {
     return {
       flowResponses: [],
